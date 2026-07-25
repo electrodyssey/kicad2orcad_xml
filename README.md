@@ -74,6 +74,40 @@ libraries exported by Capture itself, which reuse the package name.
 - Bus pins (`SymbolPinBus`) are not emitted; every pin becomes a scalar pin.
 - Hidden pins are exported as visible.
 
+## `xilinxpkg2orcad_xml.py` — banked FPGA symbols from a package pinout
+
+A KiCad FPGA symbol usually splits its units by pin *count*, not by I/O bank,
+so a converted symbol has every bank smeared across several sections. This
+companion script skips KiCad entirely and builds the OrCAD XML straight from
+the AMD/Xilinx package pin CSV (the file shipped alongside UG575), one section
+per bank:
+
+```sh
+python3 xilinxpkg2orcad_xml.py xcku060ffva1156pkg.csv \
+    --part XCKU060-2FFVA1156I --footprint FFVA1156_AMD -o xcku060.xml
+```
+
+Section order: bank 0 (configuration), HP I/O banks ascending, HR I/O banks
+ascending, GTH transceiver quads, system monitor / misc, transceiver supplies,
+core supplies, ground. Each section gets
+
+- a `CellName` suffix naming the bank and its type — `..._B44HP`, `..._B64HR`,
+  `..._Q227`, `..._COREPWR`;
+- a caption drawn inside the body (`BANK 44  HP I/O`);
+- `Bank` and `IO Type` part properties (`--no-bank-props` to omit them).
+
+Bank I/O goes on the left in Xilinx byte-group order (`T0L` `N0`…`T3U` `N12`,
+P before N), `VREF`/`VCCO` on the right. Ground is spread over
+`--gnd-sections` sections (3 by default) so no single section is metres tall.
+
+Pin electrical types come from the pin name (`IO_*` bidirectional, `MGTHTX*`
+output, `MGTHRX*`/`MGTREFCLK*` input, `VCC*`/`GND*`/`VREF*` power,
+`MGTRREF`/`MGTAVTTRCAL`/`DXP`/`DXN` passive, JTAG and mode pins per UG570),
+not from the CSV — the CSV has no type column.
+
+It reuses the XML writer from `kicad2orcad_xml.py`, so keep the two files
+together.
+
 ## Format reference
 
 The `olb.xsd` schema ships with Capture at
