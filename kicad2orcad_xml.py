@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Unlicense
 """Convert a KiCad 6/7 .kicad_sym library into an OrCAD Capture library XML
 (olb.xsd dialect) that can be imported with File > Import > Library XML.
 

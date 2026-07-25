@@ -86,3 +86,8 @@ cross-references while working on this format:
 - [Werni2A/OpenOrCadParser](https://github.com/Werni2A/OpenOrCadParser) —
   binary `.OLB`/`.DSN` parser; `src/Enums/PortType.hpp` documents the pin-type
   enum used above.
+
+## License
+
+Public domain, via [the Unlicense](https://unlicense.org) — see `LICENSE`.
+Do whatever you want with it; no attribution required.
