@@ -79,31 +79,46 @@ libraries exported by Capture itself, which reuse the package name.
 A KiCad FPGA symbol usually splits its units by pin *count*, not by I/O bank,
 so a converted symbol has every bank smeared across several sections. This
 companion script skips KiCad entirely and builds the OrCAD XML straight from
-the AMD/Xilinx package pin CSV (the file shipped alongside UG575), one section
-per bank:
+the AMD/Xilinx package pin file, one section per bank:
 
 ```sh
 python3 xilinxpkg2orcad_xml.py xcku060ffva1156pkg.csv \
     --part XCKU060-2FFVA1156I --footprint FFVA1156_AMD -o xcku060.xml
+
+python3 xilinxpkg2orcad_xml.py xc7k325tffg900pkg.txt \
+    --part XC7K325T-2FFG900I --footprint FFG900 -o xc7k325t.xml
 ```
 
+Both UltraScale and 7 series parts work, in either the `.csv` or the
+whitespace-aligned `.txt` form — the two families order their columns
+differently and 7 series files carry an extra `VCCAUX Group`, so columns are
+located by header name rather than by position. Package files live under
+`https://www.xilinx.com/support/packagefiles/`; 7 series parts are published
+as `.txt` only.
+
 Section order: bank 0 (configuration), HP I/O banks ascending, HR I/O banks
-ascending, GTH transceiver quads, system monitor / misc, transceiver supplies,
-core supplies, ground. Each section gets
+ascending, transceiver quads (GTX / GTH / GTY / GTP), system monitor / misc,
+transceiver supplies, core supplies, ground. On 7 series the system monitor
+pins belong to bank 0 and are absorbed by the configuration section rather
+than getting one of their own. Each section gets
 
 - a `CellName` suffix naming the bank and its type — `..._B44HP`, `..._B64HR`,
   `..._Q227`, `..._COREPWR`;
 - a caption drawn inside the body (`BANK 44  HP I/O`);
 - `Bank` and `IO Type` part properties (`--no-bank-props` to omit them).
 
-Bank I/O goes on the left in Xilinx byte-group order (`T0L` `N0`…`T3U` `N12`,
-P before N), `VREF`/`VCCO` on the right. Ground is spread over
-`--gnd-sections` sections (3 by default) so no single section is metres tall.
+Bank I/O goes on the left, `VREF`/`VCCO` on the right. I/O is ordered the way
+the family numbers it: UltraScale by byte group then nibble (`T0L` `N0` …
+`T3U` `N12`, P before N), 7 series by index within the bank (`IO_0`, then
+`L1P`/`L1N` … `L24P`/`L24N`, then `IO_25`). Transceiver quads put the
+reference clocks and RX lanes on the left, TX lanes on the right. Ground is
+spread over `--gnd-sections` sections (3 by default) so no single section is
+metres tall.
 
-Pin electrical types come from the pin name (`IO_*` bidirectional, `MGTHTX*`
-output, `MGTHRX*`/`MGTREFCLK*` input, `VCC*`/`GND*`/`VREF*` power,
-`MGTRREF`/`MGTAVTTRCAL`/`DXP`/`DXN` passive, JTAG and mode pins per UG570),
-not from the CSV — the CSV has no type column.
+Pin electrical types come from the pin name (`IO_*` bidirectional,
+`MGT?TX*` output, `MGT?RX*`/`MGTREFCLK*` input, `VCC*`/`GND*`/`VREF*` power,
+`MGTRREF`/`MGTAVTTRCAL`/`DXP`/`DXN` passive, JTAG and mode pins per the
+configuration user guide), not from the pinout file — it has no type column.
 
 It reuses the XML writer from `kicad2orcad_xml.py`, so keep the two files
 together.

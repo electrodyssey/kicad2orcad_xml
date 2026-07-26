@@ -50,17 +50,18 @@ MIN_BODY_W = 200
 #   4 Passive, 5 ThreeState, 6 OpenEmitter, 7 Power
 INPUT, BIDI, OUTPUT, OC, PASSIVE, TRISTATE, OE, POWER = range(8)
 
-# First match wins.
+# First match wins.  The MGT lane prefix carries a family letter -- GTX pins
+# are MGTXTX*/MGTXRX*, GTH pins MGTHTX*/MGTHRX*, GTY pins MGTYTX*/MGTYRX*.
 TYPE_RULES = [
     (r"^IO_", BIDI),
-    (r"^MGTHTX", OUTPUT),
-    (r"^MGTHRX", INPUT),
+    (r"^MGT[A-Z]?TX", OUTPUT),
+    (r"^MGT[A-Z]?RX", INPUT),
     (r"^MGTREFCLK", INPUT),
     (r"^(MGTRREF|MGTAVTTRCAL)", PASSIVE),
     (r"^(VCC|GND|MGTAVCC|MGTAVTT|MGTVCCAUX|VBATT|VREF)", POWER),
-    (r"^(DXP|DXN)$", PASSIVE),
-    (r"^(VP|VN)$", INPUT),
-    (r"^(TDO)_", OUTPUT),
+    (r"^DX[PN]", PASSIVE),
+    (r"^V[PN](_|$)", INPUT),
+    (r"^TDO(_|$)", OUTPUT),
     (r"^(TCK|TDI|TMS|M0|M1|M2|CFGBVS|PUDC_B|PROGRAM_B|POR_OVERRIDE)", INPUT),
     (r"^(INIT_B|DONE|CCLK|RDWR_FCS_B|D0\d)", BIDI),
 ]
@@ -75,16 +76,32 @@ def pin_type(name):
 
 
 # ------------------------------------------------------------------ ordering
-IO_RE = re.compile(r"^IO_(?:L(\d+)([PN])_)?T(\d)([UL])_N(\d+)")
+# UltraScale:  IO_L24P_T3U_N10_44        7 series:  IO_L11P_T1_SRCC_13
+#              IO_T3U_N12_44                        IO_0_13 / IO_25_VRP_32
+IO_US = re.compile(r"^IO_(?:L(\d+)([PN])_)?T(\d)([UL])_N(\d+)")
+IO_7P = re.compile(r"^IO_L(\d+)([PN])_T(\d)_")
+IO_7S = re.compile(r"^IO_(\d+)_")
 
 
 def io_key(p):
-    """Order bank I/O the way Xilinx numbers it: byte group, then nibble."""
-    m = IO_RE.match(p.name)
-    if not m:
-        return (9, 9, 99, p.name)
-    _, _, t, ul, n = m.groups()
-    return (int(t), 0 if ul == "L" else 1, int(n), p.name)
+    """Order bank I/O the way Xilinx numbers it.
+
+    UltraScale banks are ordered by byte group then nibble; 7 series banks by
+    the pin index within the bank, where the differential pairs L1..L24 sit
+    between the single-ended IO_0 and IO_25.  A bank never mixes the two.
+    """
+    m = IO_US.match(p.name)
+    if m:
+        _, _, t, ul, n = m.groups()
+        return (int(t), 0 if ul == "L" else 1, int(n), p.name)
+    m = IO_7P.match(p.name)
+    if m:
+        pair, pol, _ = m.groups()
+        return (int(pair), 0 if pol == "P" else 1, 0, p.name)
+    m = IO_7S.match(p.name)
+    if m:
+        return (int(m.group(1)), 0, 0, p.name)
+    return (99, 99, 99, p.name)
 
 
 def pkg_key(p):
@@ -95,16 +112,26 @@ def pkg_key(p):
     return (len(m.group(1)), m.group(1), int(m.group(2)))
 
 
-MGT_RE = re.compile(r"^MGT(REFCLK|HRX|HTX)(\d)([PN])_")
+# MGTREFCLK0P_127 numbers the lane before the polarity, MGTHRXP0_127 after it.
+MGT_CLK = re.compile(r"^MGTREFCLK(\d+)([PN])_")
+MGT_LANE = re.compile(r"^MGT[A-Z]?(RX|TX)([PN])(\d+)_")
+
+
+def is_mgt_tx(name):
+    m = MGT_LANE.match(name)
+    return bool(m) and m.group(1) == "TX"
 
 
 def mgt_key(p):
-    m = MGT_RE.match(p.name)
-    if not m:
-        return (9, 9, 9, p.name)
-    kind, idx, pol = m.groups()
-    rank = {"REFCLK": 0, "HRX": 1, "HTX": 2}[kind]
-    return (rank, int(idx), 0 if pol == "P" else 1, p.name)
+    m = MGT_CLK.match(p.name)
+    if m:
+        return (0, int(m.group(1)), 0 if m.group(2) == "P" else 1, p.name)
+    m = MGT_LANE.match(p.name)
+    if m:
+        kind, pol, idx = m.groups()
+        return (1 if kind == "RX" else 2, int(idx),
+                0 if pol == "P" else 1, p.name)
+    return (9, 9, 9, p.name)   # MGTRREF, MGTAVTTRCAL -- bank-tied on 7 series
 
 
 def name_then_pkg(p):
@@ -137,18 +164,45 @@ class Section:
 
 
 def read_pinout(path):
-    with open(path, newline="", encoding="utf-8-sig") as fh:
-        rows = list(csv.reader(fh))
-    head = next((i for i, r in enumerate(rows)
-                 if r and r[0].strip() == "Pin"), None)
+    """Read a Xilinx package pin file, comma- or whitespace-delimited.
+
+    Columns are located by header name, not by position: 7 series files carry
+    a "VCCAUX Group" column that UltraScale ones do not, and the two families
+    order the remaining columns differently.
+    """
+    text = open(path, encoding="utf-8-sig", errors="replace").read()
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    head = next((i for i, ln in enumerate(lines)
+                 if re.match(r"\s*Pin\s*[,\t]|\s*Pin\s{2,}Pin Name", ln)), None)
     if head is None:
-        sys.exit("%s: no 'Pin,Pin Name,...' header row found" % path)
+        sys.exit("%s: no 'Pin / Pin Name / Bank / I/O Type' header row" % path)
+
+    comma = "," in lines[head]
+
+    def split(ln):
+        if comma:
+            return [c.strip() for c in next(csv.reader([ln]))]
+        return [c.strip() for c in re.split(r"\s{2,}|\t", ln.strip())]
+
+    cols = {name.lower(): i for i, name in enumerate(split(lines[head]))}
+
+    def col(row, *names, **kw):
+        for n in names:
+            i = cols.get(n)
+            if i is not None and i < len(row):
+                return row[i]
+        return kw.get("default", "NA")
+
     pins = []
-    for r in rows[head + 1:]:
-        if not r or not r[0].strip() or r[0].strip() == "Total Number of Pins":
+    for ln in lines[head + 1:]:
+        if not ln.strip() or ln.lstrip().startswith("Total Number of Pins"):
             continue
-        cell = [c.strip() for c in (r + [""] * 5)[:5]]
-        pins.append(Pin(cell[0], cell[1], cell[3], cell[4], cell[2]))
+        r = split(ln)
+        if not r or not r[0]:
+            continue
+        pins.append(Pin(col(r, "pin"), col(r, "pin name"), col(r, "bank"),
+                        col(r, "i/o type", "io type"),
+                        col(r, "memory byte group")))
     return pins
 
 
@@ -205,14 +259,17 @@ def build_sections(pins, args):
             sections.append(bank_section(
                 bank, kind, "BANK %s  %s I/O" % (bank, kind)))
 
-    # --- GTH transceiver quads -------------------------------------------
-    for bank in sorted({p.bank for p in pins if p.iotype == "GTH"}, key=int):
+    # --- transceiver quads (GTX, GTH, GTP, GTY, ...) ----------------------
+    quads = sorted({(p.bank, p.iotype) for p in pins
+                    if re.match(r"^GT[A-Z]$", p.iotype)},
+                   key=lambda bk: int(bk[0]))
+    for bank, kind in quads:
         bp = sorted(by_bank[bank], key=mgt_key)
-        left = [p for p in bp if not p.name.startswith("MGTHTX")]
-        right = [p for p in bp if p.name.startswith("MGTHTX")]
-        sections.append(Section("Q%s" % bank, "GTH QUAD %s" % bank,
+        left = [p for p in bp if not is_mgt_tx(p.name)]
+        right = [p for p in bp if is_mgt_tx(p.name)]
+        sections.append(Section("Q%s" % bank, "%s QUAD %s" % (kind, bank),
                                 take(left), take(right),
-                                {"Bank": bank, "IO Type": "GTH"}))
+                                {"Bank": bank, "IO Type": kind}))
 
     # --- everything without a bank ---------------------------------------
     def pick(pred, seq=None):
@@ -220,9 +277,10 @@ def build_sections(pins, args):
         return sorted([p for p in src if pred(p) and id(p) not in used],
                       key=pkg_key)
 
-    sysmon = pick(lambda p: p.name in (
-        "DXP", "DXN", "VP", "VN", "VREFP", "VREFN", "VCCADC", "GNDADC",
-        "POR_OVERRIDE", "VBATT"))
+    # On 7 series these sit in bank 0 and are absorbed by the config section.
+    sysmon = pick(lambda p: re.match(
+        r"^(DXP|DXN|VP|VN|VREFP|VREFN|VCCADC|GNDADC|POR_OVERRIDE"
+        r"|VBATT|VCCBATT)(_\d+)?$", p.name))
     if sysmon:
         half = (len(sysmon) + 1) // 2
         sections.append(Section("MISC", "SYSTEM MONITOR / MISC",
